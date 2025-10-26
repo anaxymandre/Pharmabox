@@ -21,7 +21,7 @@
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from "vue";
-import { BrowserMultiFormatReader, BarcodeFormat } from "@zxing/browser";
+import { BrowserMultiFormatReader } from "@zxing/browser";
 
 const videoRef = ref(null);
 const canvasRef = ref(null);
@@ -29,44 +29,33 @@ const codeText = ref("");
 const parsed = ref({});
 let reader, ctx, loopId, stream;
 
-/** ✅ Fonction de parsing GS1 robuste */
-function parseGS1(raw) {
+/** ✅ Parse Datamatrix pharma GS1 (CIP, date, lot, série) */
+function parsePharmaGS1(raw) {
   const data = {};
   if (!raw) return data;
 
-  // Certains codes utilisent ASCII 29 (␟) comme séparateur → on normalise
-  const normalized = raw
-    .replace(/\u001D/g, "(GS)") // visible pour debug
-    .replace(/\(/g, "")
-    .replace(/\)/g, "")
-    .trim();
+  // Nettoyage : on supprime caractères non imprimables
+  const text = raw.replace(/[\u0000-\u001F\u007F]/g, "").trim();
 
-  // Recherche des AIs connus
-  const regex = /(01|17|10|21)([0-9A-Za-z]+)/g;
-  let match;
-  while ((match = regex.exec(normalized))) {
-    const ai = match[1];
-    const value = match[2];
-    switch (ai) {
-      case "01":
-        data.cip = value.trim();
-        break;
-      case "17":
-        if (value.length >= 6) {
-          const yy = "20" + value.substring(0, 2);
-          const mm = value.substring(2, 4);
-          const dd = value.substring(4, 6);
-          data.expiration = `${dd}/${mm}/${yy}`;
-        }
-        break;
-      case "10":
-        data.lot = value.trim();
-        break;
-      case "21":
-        data.serial = value.trim();
-        break;
-    }
+  // Cas standard concaténé sans parenthèses
+  const ai01 = text.match(/^01(\d{14})/);
+  if (ai01) data.cip = ai01[1];
+
+  const ai17 = text.match(/17(\d{6})/);
+  if (ai17) {
+    const v = ai17[1];
+    data.expiration = `${v.slice(4, 6)}/${v.slice(2, 4)}/20${v.slice(0, 2)}`;
   }
+
+  const ai10 = text.match(/10([A-Z0-9]+)/);
+  if (ai10) {
+    // Le lot s’arrête avant 21 (numéro série) ou fin
+    const lotRaw = ai10[1].split("21")[0];
+    data.lot = lotRaw;
+  }
+
+  const ai21 = text.match(/21([A-Z0-9]+)/);
+  if (ai21) data.serial = ai21[1];
 
   return data;
 }
@@ -99,13 +88,14 @@ async function startScanner() {
       if (!video || video.readyState !== 4) return;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+      // léger contraste
       const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imgData.data;
       for (let i = 0; i < data.length; i += 4) {
         const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
-        const factor = 1.5;
-        const newVal = Math.min(255, Math.max(0, (gray - 128) * factor + 128));
-        data[i] = data[i + 1] = data[i + 2] = newVal;
+        const factor = 1.4;
+        const val = Math.min(255, Math.max(0, (gray - 128) * factor + 128));
+        data[i] = data[i + 1] = data[i + 2] = val;
       }
       ctx.putImageData(imgData, 0, 0);
 
@@ -114,13 +104,12 @@ async function startScanner() {
         if (result) {
           const text = result.getText();
           if (text && text !== codeText.value) {
-            console.log("Code brut :", text);
             codeText.value = text;
-            parsed.value = parseGS1(text);
+            parsed.value = parsePharmaGS1(text);
           }
         }
       } catch {
-        /* aucun code trouvé */
+        /* pas de code trouvé */
       }
 
       loopId = requestAnimationFrame(scan);
@@ -148,6 +137,7 @@ onBeforeUnmount(() => {
   if (stream) stream.getTracks().forEach((t) => t.stop());
 });
 </script>
+
 
 <style scoped>
 .scanner-container {
