@@ -12,7 +12,6 @@
       <p><strong>Date d’expiration :</strong> {{ parsed.expiration || "—" }}</p>
       <p><strong>Lot :</strong> {{ parsed.lot || "—" }}</p>
       <p><strong>N° de série :</strong> {{ parsed.serial || "—" }}</p>
-      <button @click="resetScan" class="reset-btn">🔄 Scanner un autre médicament</button>
     </div>
 
     <p v-else class="hint">Alignez le code Datamatrix dans le carré vert…</p>
@@ -20,7 +19,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from "vue";
+import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 import { BrowserMultiFormatReader } from "@zxing/browser";
 
 const videoRef = ref(null);
@@ -29,38 +28,61 @@ const codeText = ref("");
 const parsed = ref({});
 let reader, ctx, loopId, stream;
 
-/** ✅ Parse Datamatrix pharma GS1 (CIP, date, lot, série) */
-function parsePharmaGS1(raw) {
+/**
+ * ✅ Décode un Datamatrix pharmaceutique GS1 selon la norme européenne
+ * Source : Directive 2011/62/UE + https://meditrust.io/datamatrix-definition
+ * Gère les cas sans séparateurs visibles (ASCII 29)
+ */
+function parseGS1Pharma(raw) {
   const data = {};
   if (!raw) return data;
 
-  // Nettoyage : on supprime caractères non imprimables
+  // 1. Nettoyage
   const text = raw.replace(/[\u0000-\u001F\u007F]/g, "").trim();
 
-  // Cas standard concaténé sans parenthèses
-  const ai01 = text.match(/^01(\d{14})/);
-  if (ai01) data.cip = ai01[1];
+  // 2. On cherche les AI dans n’importe quel ordre
+  // Chaque AI est suivi immédiatement par sa donnée
+  const aiPatterns = [
+    { key: "cip", ai: "01", length: 14, fixed: true }, // GTIN / CIP
+    { key: "expiration", ai: "17", length: 6, fixed: true },
+    { key: "lot", ai: "10", fixed: false }, // jusqu’à prochain AI
+    { key: "serial", ai: "21", fixed: false },
+  ];
 
-  const ai17 = text.match(/17(\d{6})/);
-  if (ai17) {
-    const v = ai17[1];
-    data.expiration = `${v.slice(4, 6)}/${v.slice(2, 4)}/20${v.slice(0, 2)}`;
+  let pos = 0;
+  while (pos < text.length) {
+    const ai = text.slice(pos, pos + 2);
+    const pattern = aiPatterns.find((p) => p.ai === ai);
+    if (pattern) {
+      pos += 2;
+      if (pattern.fixed) {
+        const val = text.slice(pos, pos + pattern.length);
+        if (pattern.ai === "01") data.cip = val;
+        if (pattern.ai === "17") {
+          const yy = "20" + val.slice(0, 2);
+          const mm = val.slice(2, 4);
+          const dd = val.slice(4, 6);
+          data.expiration = `${dd}/${mm}/${yy}`;
+        }
+        pos += pattern.length;
+      } else {
+        // variable-length (lot ou serial)
+        let next = text.slice(pos).match(/(01|17|10|21|00|30|37|400|415|7001)/);
+        const end = next ? pos + next.index : text.length;
+        const val = text.slice(pos, end);
+        if (pattern.ai === "10") data.lot = val;
+        if (pattern.ai === "21") data.serial = val;
+        pos = end;
+      }
+    } else {
+      pos++;
+    }
   }
-
-  const ai10 = text.match(/10([A-Z0-9]+)/);
-  if (ai10) {
-    // Le lot s’arrête avant 21 (numéro série) ou fin
-    const lotRaw = ai10[1].split("21")[0];
-    data.lot = lotRaw;
-  }
-
-  const ai21 = text.match(/21([A-Z0-9]+)/);
-  if (ai21) data.serial = ai21[1];
 
   return data;
 }
 
-/** Démarre la caméra et le scan */
+/** Démarre le scanner */
 async function startScanner() {
   reader = new BrowserMultiFormatReader();
 
@@ -88,28 +110,17 @@ async function startScanner() {
       if (!video || video.readyState !== 4) return;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // léger contraste
-      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const data = imgData.data;
-      for (let i = 0; i < data.length; i += 4) {
-        const gray = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
-        const factor = 1.4;
-        const val = Math.min(255, Math.max(0, (gray - 128) * factor + 128));
-        data[i] = data[i + 1] = data[i + 2] = val;
-      }
-      ctx.putImageData(imgData, 0, 0);
-
       try {
         const result = await reader.decodeFromCanvas(canvas);
         if (result) {
           const text = result.getText();
           if (text && text !== codeText.value) {
             codeText.value = text;
-            parsed.value = parsePharmaGS1(text);
+            parsed.value = parseGS1Pharma(text);
           }
         }
       } catch {
-        /* pas de code trouvé */
+        /* aucun code trouvé */
       }
 
       loopId = requestAnimationFrame(scan);
@@ -120,15 +131,22 @@ async function startScanner() {
   }
 }
 
-/** 🔄 Reset complet */
-function resetScan() {
+/** Réinitialise tout quand on clique sur "Scanner un médicament" */
+function resetScanner() {
   codeText.value = "";
   parsed.value = {};
   if (loopId) cancelAnimationFrame(loopId);
   if (reader) reader.reset();
   if (stream) stream.getTracks().forEach((t) => t.stop());
-  startScanner(); // redémarrage propre
+  startScanner();
 }
+
+// Option : si ton bouton principal "Scanner un médicament" déclenche un event global
+// tu peux écouter un signal via un prop ou un store si besoin
+watch(codeText, (newVal) => {
+  // tu peux loguer ici pour debug
+  console.log("Code brut :", newVal);
+});
 
 onMounted(startScanner);
 onBeforeUnmount(() => {
@@ -137,6 +155,7 @@ onBeforeUnmount(() => {
   if (stream) stream.getTracks().forEach((t) => t.stop());
 });
 </script>
+
 
 
 <style scoped>
