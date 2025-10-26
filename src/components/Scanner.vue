@@ -5,7 +5,7 @@
 
     <div class="overlay" v-if="!codeText"><div class="target"></div></div>
 
-    <!-- Affichage des infos médicament -->
+    <!-- Résultat -->
     <div v-if="codeText" class="result-card">
       <h2>📦 Informations détectées</h2>
       <p><strong>Code CIP :</strong> {{ parsed.cip || "—" }}</p>
@@ -29,23 +29,35 @@ const codeText = ref("");
 const parsed = ref({});
 let reader, ctx, loopId, stream;
 
-/** Fonction pour parser le contenu Datamatrix GS1 */
-function parseGS1(text) {
+/** ✅ Fonction de parsing GS1 robuste */
+function parseGS1(raw) {
   const data = {};
-  const regex = /\((\d{2})\)([^\(]+)/g;
+  if (!raw) return data;
+
+  // Certains codes utilisent ASCII 29 (␟) comme séparateur → on normalise
+  const normalized = raw
+    .replace(/\u001D/g, "(GS)") // visible pour debug
+    .replace(/\(/g, "")
+    .replace(/\)/g, "")
+    .trim();
+
+  // Recherche des AIs connus
+  const regex = /(01|17|10|21)([0-9A-Za-z]+)/g;
   let match;
-  while ((match = regex.exec(text))) {
-    const [, ai, value] = match;
+  while ((match = regex.exec(normalized))) {
+    const ai = match[1];
+    const value = match[2];
     switch (ai) {
       case "01":
         data.cip = value.trim();
         break;
       case "17":
-        // format YYMMDD → conversion lisible
-        const yy = "20" + value.substring(0, 2);
-        const mm = value.substring(2, 4);
-        const dd = value.substring(4, 6);
-        data.expiration = `${dd}/${mm}/${yy}`;
+        if (value.length >= 6) {
+          const yy = "20" + value.substring(0, 2);
+          const mm = value.substring(2, 4);
+          const dd = value.substring(4, 6);
+          data.expiration = `${dd}/${mm}/${yy}`;
+        }
         break;
       case "10":
         data.lot = value.trim();
@@ -55,9 +67,11 @@ function parseGS1(text) {
         break;
     }
   }
+
   return data;
 }
 
+/** Démarre la caméra et le scan */
 async function startScanner() {
   reader = new BrowserMultiFormatReader();
 
@@ -97,12 +111,16 @@ async function startScanner() {
 
       try {
         const result = await reader.decodeFromCanvas(canvas);
-        if (result && result.getText() !== codeText.value) {
-          codeText.value = result.getText();
-          parsed.value = parseGS1(codeText.value);
+        if (result) {
+          const text = result.getText();
+          if (text && text !== codeText.value) {
+            console.log("Code brut :", text);
+            codeText.value = text;
+            parsed.value = parseGS1(text);
+          }
         }
       } catch {
-        /* pas de code trouvé */
+        /* aucun code trouvé */
       }
 
       loopId = requestAnimationFrame(scan);
@@ -113,16 +131,14 @@ async function startScanner() {
   }
 }
 
-/** Réinitialiser le scanner */
+/** 🔄 Reset complet */
 function resetScan() {
   codeText.value = "";
   parsed.value = {};
   if (loopId) cancelAnimationFrame(loopId);
   if (reader) reader.reset();
-  if (stream) {
-    stream.getTracks().forEach((t) => t.stop());
-  }
-  startScanner();
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  startScanner(); // redémarrage propre
 }
 
 onMounted(startScanner);
